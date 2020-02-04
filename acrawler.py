@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import collections
 import sys
@@ -59,21 +60,59 @@ async def fetch(session, url, chunk_size=8192):
                 yield str(chunk)
 
 
-async def crawl(site_url):
-    """Given `site_url`, just crawls that page and writes to stdout a sitemap"""
+class Crawler:
 
-    tag_parser = TagParser({"a", "img"})
-    yaml = YAML()
-    yaml.register_class(Tag)  # TODO: consider nondefault serialization
-    async with aiohttp.ClientSession() as session:
-        async for chunk in fetch(session, site_url):
-            for tag in tag_parser.consume(chunk):
-                if tag.name == "a":
-                    # NOTE: outputing a list takes advantage of YAML's
-                    # serialization for lists, which is both concatable and
-                    # tailable
-                    yaml.dump([tag], sys.stdout)
-                
+    def __init__(self, root_urls, max_pages=5, output=sys.stdout):
+        self.root_urls = root_urls
+        self.max_pages = max_pages
+        self.output = output
+        self.frontier = collections.deque(root_urls)
+        self.count_pages = 0
+        self.seen = {}
+
+    async def crawl(self):
+        while self.frontier and self.count_pages < self.max_pages:
+            await self.crawl_next()
+            self.count_pages += 1
+
+    async def crawl_next(self):
+        """Crawls the next url from the `frontier`, writing to stdout a sitemap"""
+
+        # TODO: support other policies in addition to breadth-first traversal of
+        # the frontier
+        url = self.frontier.popleft()
+
+        tag_parser = TagParser({"a", "img"})
+        yaml = YAML()
+        yaml.register_class(Tag)  # TODO: consider nondefault serialization
+
+        # TODO: session init can be shared across crawling a given site
+        async with aiohttp.ClientSession() as session:
+            async for chunk in fetch(session, url):
+                # TODO: add anchor tags to frontier if not seen, etc;
+                # also refactor this code a bit
+                for tag in tag_parser.consume(chunk):
+                    if tag.name == "a":
+                        # NOTE: outputing a list takes advantage of YAML's
+                        # serialization for lists, which is both concatable and
+                        # tailable
+                        yaml.dump([tag], self.output)
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Crawl specified URLs.")
+    parser.add_argument("roots", metavar="URL", nargs="+",
+                        help="List of URL roots to crawl")
+    parser.add_argument("--max", type=int, default=5, help="Maximum number of pages to crawl")
+    # FIXME: add other output location than sys.stdout
+    return parser.parse_args(argv)
+
+
+async def main(argv):
+    args = parse_args(argv)
+    crawler = Crawler(args.roots, args.max, sys.stdout)
+    await crawler.crawl()
+
 
 if __name__ == "__main__":  # pragma: no cover
-    asyncio.run(crawl(sys.argv[1]))
+    asyncio.run(main(sys.argv))

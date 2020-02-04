@@ -25,10 +25,22 @@ def test_tag_parser():
         acrawler.Tag("a", {"href": "https://www.iana.org/domains/example"})]
 
 
+def test_parse_command_line():
+    args = acrawler.parse_args(
+        "--max=42 "
+        "https://example.com https://example.org https://example.net".split())
+    assert args.roots == [
+        "https://example.com",
+        "https://example.org",
+        "https://example.net",
+    ]
+    assert args.max == 42
+
+
 # Requires internet connectivity to test
 @pytest.mark.asyncio
 async def test_run_acrawler(capsys):
-    await acrawler.crawl("https://example.com")
+    await acrawler.main(["https://example.com"])
     captured = capsys.readouterr()
     assert captured.out == """\
 - !Tag
