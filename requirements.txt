@@ -1,2 +1,6 @@
+aiohttp[speedups]   # use for asyncio HTTP client
+ruamel.yaml         # YAML 1.2 serializer/deserializer
+
+# testing support
 pytest-asyncio
 pytest-cov
