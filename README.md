@@ -1,7 +1,7 @@
 # acrawler
 
 acrawler, an asyncio-based crawler, is yet another crawler to demonstrate how to
-scalably crawl the web. It can also be readily adapted to crawl APIs, such as
+scalably crawl web sites. It can also be readily adapted to crawl APIs, such as
 YouTube's API.
 
 * To install: `make init`
@@ -12,7 +12,7 @@ NOTE: This code requires the use of Python 3.8.
 
 # Branches
 
-This project is a demonstrate on how to approach the building of a scalable web
+This project is a demonstration on how to approach the building of a scalable web
 crawler by using asyncio. Therefore I have attached the sequence of branches
 needed for this implementation.
 
@@ -40,4 +40,6 @@ Branch: https://github.com/jimbaker/acrawler/tree/operations
 
 1. Implement basic crawling logic, including a set of seen URLs and a frontier
    that is used for scheduling.
-2. FIXME
+2. Basic resolution of URLs from relative to absolute
+
+Branch: https://github.com/jimbaker/acrawler/tree/crawler

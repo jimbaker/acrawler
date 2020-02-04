@@ -1,5 +1,9 @@
 import pytest
+
 import acrawler
+import collections
+from acrawler import Tag
+from ruamel.yaml import YAML
 
 
 # Based on the page from https://example.com
@@ -22,7 +26,7 @@ example_html = """
 def test_tag_parser():
     tag_parser = acrawler.TagParser({"a"})
     assert list(tag_parser.consume(example_html)) == [
-        acrawler.Tag("a", {"href": "https://www.iana.org/domains/example"})]
+        acrawler.Tag("a", None, {"href": "https://www.iana.org/domains/example"})]
 
 
 def test_parse_command_line():
@@ -37,15 +41,38 @@ def test_parse_command_line():
     assert args.max == 42
 
 
+def test_resolve_url():
+    assert acrawler.resolve_url(
+        "https://example.com", "https://www.iana.org/domains/example") == \
+        "https://www.iana.org/domains/example"
+    assert acrawler.resolve_url("https://example.com", "baz/bar") == \
+        "https://example.com/baz/bar"
+    assert acrawler.resolve_url("https://example.com",
+        "https://example.com/") == \
+        "https://example.com"
+    assert acrawler.resolve_url("https://example.com",
+        "https://example.com#fragment") == \
+        "https://example.com"
+
+
 # Requires internet connectivity to test
 @pytest.mark.asyncio
 async def test_run_acrawler(capsys):
-    await acrawler.main(["https://example.com"])
+    await acrawler.main(["--max=1", "https://example.com"])
     captured = capsys.readouterr()
+
     assert captured.out == """\
 - !Tag
   name: a
+  url: https://www.iana.org/domains/example
   attrs:
     href: https://www.iana.org/domains/example
 """
+    
+    yaml = YAML()
+    yaml.register_class(Tag)
+    sitemap = yaml.load(captured.out)
+    assert sitemap == [
+        Tag("a", "https://www.iana.org/domains/example",
+            {"href": "https://www.iana.org/domains/example"})]
 
