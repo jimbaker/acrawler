@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import collections
+import math
 import sys
 import urllib
 from dataclasses import dataclass
@@ -86,32 +87,64 @@ def resolve_url(root, url):
 
 class Crawler:
 
-    def __init__(self, root_urls, max_pages=5, output=sys.stdout):
+    def __init__(self, root_urls, max_pages=5, num_workers=3, output=sys.stdout):
         self.root_urls = root_urls
+        self.sites = set()
         self.max_pages = max_pages
+        self.num_workers = num_workers
         self.output = output
-        self.frontier = collections.deque(root_urls)
+        self.frontier = asyncio.Queue()
         self.count_pages = 0
         self.seen = set()
 
+        for url in root_urls:
+            parsed_url = urllib.parse.urlsplit(url)
+            self.sites.add(parsed_url.netloc)
+            self.frontier.put_nowait(url)
+
     async def crawl(self):
+        """Create and run worker tasks to process the `frontier` concurrently"""
+        
+        # This method's implementation is modestly modified from the boilerplate
+        # in https://docs.python.org/3/library/asyncio-queue.html#examples
+        tasks = []
+        for i in range(self.num_workers):
+            task = asyncio.create_task(self.worker(f'worker-{i}'))
+            tasks.append(task)
+
+        # Wait until the frontier queue is fully processed.
+        await self.frontier.join()
+        
+        # Cancel our worker tasks.
+        for task in tasks:
+            task.cancel()
+        
+        # Wait until all worker tasks are cancelled.
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def worker(self, name):
         yaml = YAML()
         yaml.register_class(Tag)  # TODO: consider nondefault serialization
 
-        while self.frontier and self.count_pages < self.max_pages:
-            async for tag in self.crawl_next():
+        while self.count_pages < self.max_pages:
+            # TODO: support other policies in addition to breadth-first
+            # traversal of the frontier
+            url = await self.frontier.get()
+            async for tag in self.crawl_next(url):
                 # NOTE: outputing a list takes advantage of YAML's
                 # serialization for lists, which is both concatable and
                 # tailable
                 yaml.dump([tag], self.output)
+            self.frontier.task_done()
             self.count_pages += 1
+        
+        # Drain the frontier - do not want to cause a DOS attack
+        while True:
+            url = await self.frontier.get()
+            self.frontier.task_done()
 
-    async def crawl_next(self):
+    async def crawl_next(self, url):
         """Crawls the next url from the `frontier`, writing to stdout a sitemap"""
-
-        # TODO: support other policies in addition to breadth-first traversal of
-        # the frontier
-        url = self.frontier.popleft()
         if url in self.seen:
             return
         self.seen.add(url)
@@ -126,8 +159,22 @@ class Crawler:
                 for tag in tag_parser.consume(chunk):
                     if tag.name == "a" and "href" in tag.attrs:
                         tag.url = resolve_url(url, tag.attrs["href"])
-                        self.frontier.append(tag.url)
+                        # TODO: repeat of the above parsing work, but of course
+                        # minor amount of work
+                        parsed_tag_url = urllib.parse.urlsplit(tag.url)
+
+                        # Filter entries placed on the exploration frontier such
+                        # that they are all prefixed by one of the root sites
+                        if parsed_tag_url.netloc in self.sites:
+                            self.frontier.put_nowait(tag.url)
+                    elif tag.name == "img" and "src" in tag.attrs:
+                        tag.url = resolve_url(url, tag.attrs["src"])
+
+                    if tag.url is not None:
+                        # for writing to the sitemap
                         yield tag
+                        
+
 
 
 def parse_args(argv):
@@ -135,15 +182,24 @@ def parse_args(argv):
         description="Output sitemap by crawling specified root URLs.")
     parser.add_argument("roots", metavar="URL", nargs="+",
         help="List of URL roots to crawl")
-    parser.add_argument("--max", type=int, default=5,
+    parser.add_argument("--num-workers", type=int, default=3,
+        help="Number of workers to concurrently crawl pages")
+    parser.add_argument("--max-pages", type=int, default=25,
         help="Maximum number of pages to crawl")
-    # FIXME: add other output location than sys.stdout
+    parser.add_argument("--all", action="store_true",
+        help="Retrieve all pages under the specified roots")
+    # TODO: add other output location than sys.stdout
     return parser.parse_args(argv)
 
 
 async def main(argv):
     args = parse_args(argv)
-    crawler = Crawler(args.roots, args.max, sys.stdout)
+    if args.all:
+        max_pages = math.inf
+    else:
+        max_pages = args.max_pages
+
+    crawler = Crawler(args.roots, max_pages, args.num_workers, sys.stdout)
     await crawler.crawl()
 
 
