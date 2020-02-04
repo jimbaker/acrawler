@@ -1,0 +1,7 @@
+#!/usr/bin/env python
+
+import acrawler
+import asyncio
+import sys
+
+asyncio.run(acrawler.main(sys.argv[1:]))  # pragma: no cover

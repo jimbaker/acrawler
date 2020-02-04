@@ -86,7 +86,7 @@ def resolve_url(root, url):
 
 
 class Crawler:
-
+    """Manages crawling"""
     def __init__(self, root_urls, max_pages=5, num_workers=3, output=sys.stdout):
         self.root_urls = root_urls
         self.sites = set()
@@ -104,7 +104,6 @@ class Crawler:
 
     async def crawl(self):
         """Create and run worker tasks to process the `frontier` concurrently"""
-        
         # This method's implementation is modestly modified from the boilerplate
         # in https://docs.python.org/3/library/asyncio-queue.html#examples
         tasks = []
@@ -123,6 +122,7 @@ class Crawler:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def worker(self, name):
+        """Crawls pages from the `frontier` work queue"""
         yaml = YAML()
         yaml.register_class(Tag)  # TODO: consider nondefault serialization
 
@@ -173,26 +173,33 @@ class Crawler:
                     if tag.url is not None:
                         # for writing to the sitemap
                         yield tag
-                        
-
 
 
 def parse_args(argv):
+    """Parses arguments from the command line"""
     parser = argparse.ArgumentParser(
         description="Output sitemap by crawling specified root URLs.")
     parser.add_argument("roots", metavar="URL", nargs="+",
         help="List of URL roots to crawl")
-    parser.add_argument("--num-workers", type=int, default=3,
+    parser.add_argument("--num-workers",
+        type=int,
+        default=3,
+        metavar="NUM",   
         help="Number of workers to concurrently crawl pages")
-    parser.add_argument("--max-pages", type=int, default=25,
-        help="Maximum number of pages to crawl")
-    parser.add_argument("--all", action="store_true",
+    parser.add_argument("--max-pages",
+        type=int,
+        default=25,
+        metavar="NUM",
+        help="Maximum number of pages to crawl (override with --all)")
+    parser.add_argument("--all",
+        action="store_true",
         help="Retrieve all pages under the specified roots")
     # TODO: add other output location than sys.stdout
     return parser.parse_args(argv)
 
 
 async def main(argv):
+    """Provides the command line interface to running the crawler async"""
     args = parse_args(argv)
     if args.all:
         max_pages = math.inf
