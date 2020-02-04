@@ -31,14 +31,14 @@ def test_tag_parser():
 
 def test_parse_command_line():
     args = acrawler.parse_args(
-        "--max=42 "
+        "--max-pages=42 "
         "https://example.com https://example.org https://example.net".split())
     assert args.roots == [
         "https://example.com",
         "https://example.org",
         "https://example.net",
     ]
-    assert args.max == 42
+    assert args.max_pages == 42
 
 
 def test_resolve_url():
@@ -58,7 +58,7 @@ def test_resolve_url():
 # Requires internet connectivity to test
 @pytest.mark.asyncio
 async def test_run_acrawler(capsys):
-    await acrawler.main(["--max=1", "https://example.com"])
+    await acrawler.main(["https://example.com"])
     captured = capsys.readouterr()
 
     assert captured.out == """\
