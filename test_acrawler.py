@@ -2,6 +2,7 @@ import asyncio
 import collections
 import contextlib
 import functools
+import math
 import unittest
 import unittest.mock
 
@@ -26,6 +27,8 @@ example_html = """
 </body>
 </html>
 """
+
+
 
 
 def make_fake_http_session(data):
@@ -101,25 +104,52 @@ async def test_fetch():
     assert "".join(chunks) == example_html
 
 
-# @pytest.mark.asyncio
-# async def test_crawler():
-#     fake_session_maker = functools.partial(
-#         make_fake_http_session, bytes(example_html, "utf-8"))
+reference_loop_html = """
+<body>
+    <p><a href="https://reference-loop.example">Click to loop again...</a></p>
+</body>
+"""
 
-#     tags = []
-#     def serializer(objects):
-#         tags.append(objects)
 
-#     crawler = acrawler.Crawler(
-#         fake_session_maker, serializer,
-#         ["https://url-is.invalid", "https://another-url-is.invalid"],
-#         num_workers=1, max_pages=1)
-#     await crawler.crawl()
-#     assert tags == [[Tag(
-#         "a", "https://www.iana.org/domains/example",
-#         {"href": "https://www.iana.org/domains/example"})]]
-#     assert crawler.frontier.qsize() == 0
-#     assert len(crawler.seen) == 1
+@pytest.mark.asyncio
+async def test_crawler():
+    fake_session_maker = functools.partial(
+        make_fake_http_session, bytes(example_html, "utf-8"))
+
+    tags = []
+    def serializer(objects):
+        tags.append(objects)
+
+    crawler = acrawler.Crawler(
+        fake_session_maker, serializer,
+        ["https://url-is.invalid", "https://another-url-is.invalid"],
+        num_workers=1, max_pages=1)
+    await crawler.crawl()
+    assert tags == [[Tag(
+        "a", "https://www.iana.org/domains/example",
+        {"href": "https://www.iana.org/domains/example"})]]
+    assert crawler.frontier.qsize() == 0
+    assert len(crawler.seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_reference_loop():
+    fake_session_maker = functools.partial(
+        make_fake_http_session, bytes(reference_loop_html, "utf-8"))
+
+    tags = []
+    def serializer(objects):
+        tags.append(objects)
+
+    crawler = acrawler.Crawler(
+        fake_session_maker, serializer,
+        ["https://reference-loop.example"])
+    await crawler.crawl()
+    assert tags == [[Tag(
+        "a", "https://reference-loop.example",
+        {"href": "https://reference-loop.example"})]]
+    assert crawler.frontier.qsize() == 0
+    assert crawler.seen == {"https://reference-loop.example"}
 
 
 def test_parse_command_line_some_pages():
@@ -139,7 +169,7 @@ def test_parse_command_line_all_pages():
     args = acrawler.parse_args(
         "--all https://example.com".split())
     assert args.roots == ["https://example.com"]
-    assert args.max_pages == 25  # Default, but ignore given --all
+    assert args.max_pages == math.inf
     assert args.all
 
 
@@ -160,11 +190,12 @@ def test_resolve_url():
 # Requires internet connectivity to test
 @pytest.mark.asyncio
 async def test_run_acrawler(capsys):
-    await acrawler.main("https://example.com")
+    await acrawler.main(["https://example.com"])
     captured = capsys.readouterr()
     assert captured.out == """\
 - !Tag
   name: a
+  url: https://www.iana.org/domains/example
   attrs:
     href: https://www.iana.org/domains/example
 """

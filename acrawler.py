@@ -26,8 +26,8 @@ class CollectorHTMLParser(HTMLParser):
 @dataclass
 class Tag:
     name: str
-    attrs: dict
     url: str
+    attrs: dict
     
 
 class TagParser:
@@ -190,17 +190,16 @@ def parse_args(argv):
     parser.add_argument("--all", action="store_true",
         help="Retrieve all pages under the specified roots")
     # TODO: add other output location than sys.stdout
-    return parser.parse_args(argv)
+
+    args = parser.parse_args(argv)
+    if args.all:
+        args.max_pages = math.inf
+    return args
 
 
 async def main(argv):
-    """FIXME"""
+    """Runs a crawler under an event loop"""
     args = parse_args(argv)
-    if args.all:
-        max_pages = math.inf
-    else:
-        max_pages = args.max_pages
-
     yaml = YAML()
     yaml.register_class(Tag)
 
@@ -212,7 +211,7 @@ async def main(argv):
 
     crawler = Crawler(
         aiohttp.ClientSession, serializer,
-        args.roots, max_pages, args.num_workers)
+        args.roots, args.max_pages, args.num_workers)
     await crawler.crawl()
                 
 
