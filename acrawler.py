@@ -45,8 +45,8 @@ class TagParser:
     def consume(self, chunk):
         self.html_parser.feed(chunk)
         while self.queue:
-            tagname, attrs = self.queue.popleft()
-            yield Tag(tagname, None, dict(attrs))
+            tag, attrs = self.queue.popleft()
+            yield Tag(tag, None, dict(attrs))
 
 
 async def fetch(session, url, chunk_size=8192):
@@ -57,10 +57,8 @@ async def fetch(session, url, chunk_size=8192):
             if not chunk:
                 break
             else:
-                # HTMLParser wants str, not bytes, so coerce accordingly,
-                # assuming UTF-8
-                # FIXME: doublecheck text encoding support
-                yield str(chunk)
+                # HTMLParser wants str, not bytes, so coerce accordingly.
+                yield chunk.decode("utf-8")  # default encoding for aiohttp client
 
 
 def resolve_url(root, url):
@@ -86,13 +84,17 @@ def resolve_url(root, url):
 
 
 class Crawler:
-
-    def __init__(self, root_urls, max_pages=5, num_workers=3, output=sys.stdout):
+    """Crawls URLs using async tasks and an in-memory frontier queue"""
+    
+    def __init__(self, session_maker, serializer, root_urls, max_pages=5, num_workers=3):
+        # TODO we should also have some way of configuring seen/frontier
+        self.session_maker = session_maker
+        self.serializer = serializer
         self.root_urls = root_urls
         self.sites = set()
         self.max_pages = max_pages
         self.num_workers = num_workers
-        self.output = output
+
         self.frontier = asyncio.Queue()
         self.count_pages = 0
         self.seen = set()
@@ -107,6 +109,7 @@ class Crawler:
         
         # This method's implementation is modestly modified from the boilerplate
         # in https://docs.python.org/3/library/asyncio-queue.html#examples
+        
         tasks = []
         for i in range(self.num_workers):
             task = asyncio.create_task(self.worker(f'worker-{i}'))
@@ -123,61 +126,62 @@ class Crawler:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def worker(self, name):
-        yaml = YAML()
-        yaml.register_class(Tag)  # TODO: consider nondefault serialization
-
-        while self.count_pages < self.max_pages:
-            # TODO: support other policies in addition to breadth-first
-            # traversal of the frontier
-            url = await self.frontier.get()
-            async for tag in self.crawl_next(url):
-                # NOTE: outputing a list takes advantage of YAML's
-                # serialization for lists, which is both concatable and
-                # tailable
-                yaml.dump([tag], self.output)
-            self.frontier.task_done()
-            self.count_pages += 1
+        # TODO: when crawling APIs/password protected sites, this should be done
+        # per site - presumably this can be memoized
+        async with self.session_maker() as session:
+            while self.count_pages < self.max_pages:
+                # TODO: support other policies in addition to breadth-first
+                # traversal of the frontier
+                url = await self.frontier.get()
+                async for tag in self.crawl_next(session, url):
+                    self.serializer([tag])
+                self.frontier.task_done()
+                self.count_pages += 1
         
         # Drain the frontier - do not want to cause a DOS attack
         while True:
             url = await self.frontier.get()
             self.frontier.task_done()
 
-    async def crawl_next(self, url):
-        """Crawls the next url from the `frontier`, writing to stdout a sitemap"""
+    async def crawl_next(self, session, url):
+        """Crawls the next url from the `frontier`, processing tags for the sitemap"""
         if url in self.seen:
             return
         self.seen.add(url)
 
         tag_parser = TagParser({"a", "img"})
 
-        # TODO: session init can be shared across crawling a given site
-        async with aiohttp.ClientSession() as session:
-            async for chunk in fetch(session, url):
-                # TODO: add anchor tags to frontier if not seen, etc;
-                # also refactor this code a bit
-                for tag in tag_parser.consume(chunk):
-                    if tag.name == "a" and "href" in tag.attrs:
-                        tag.url = resolve_url(url, tag.attrs["href"])
-                        # TODO: repeat of the above parsing work, but of course
-                        # minor amount of work
-                        parsed_tag_url = urllib.parse.urlsplit(tag.url)
+        # TODO: support 301, error handling in general here
+        async for chunk in fetch(session, url):
+            for tag in self.process_sitemap_tags(url, tag_parser, chunk):
+                yield tag
 
-                        # Filter entries placed on the exploration frontier such
-                        # that they are all prefixed by one of the root sites
-                        if parsed_tag_url.netloc in self.sites:
-                            self.frontier.put_nowait(tag.url)
-                    elif tag.name == "img" and "src" in tag.attrs:
-                        tag.url = resolve_url(url, tag.attrs["src"])
+    def process_sitemap_tags(self, url, tag_parser, chunk):
+        """Yields sitemap tags and added to `frontier` if under `roots`"""
+        # TODO: This method should be refactored to support a separate factory,
+        # much like session_maker and serializer. This work will require
+        # revisiting tag_parser/chunk calling convention from crawl_next.
+        for tag in tag_parser.consume(chunk):
+            if tag.name == "a" and "href" in tag.attrs:
+                tag.url = resolve_url(url, tag.attrs["href"])
+                # TODO: repeat of the above parsing work, but of course
+                # minor amount of work
+                parsed_tag_url = urllib.parse.urlsplit(tag.url)
 
-                    if tag.url is not None:
-                        # for writing to the sitemap
-                        yield tag
-                        
+                # Filter entries placed on the exploration frontier such
+                # that they are all prefixed by one of the root sites
+                if parsed_tag_url.netloc in self.sites:
+                    self.frontier.put_nowait(tag.url)
+            elif tag.name == "img" and "src" in tag.attrs:
+                tag.url = resolve_url(url, tag.attrs["src"])
 
+            if tag.url is not None:
+                # If it has a url defined, it is part of the sitemap, so yield
+                yield tag
 
 
 def parse_args(argv):
+    """Parse command line arguments and return an argparse `Namespace`"""
     parser = argparse.ArgumentParser(
         description="Output sitemap by crawling specified root URLs.")
     parser.add_argument("roots", metavar="URL", nargs="+",
@@ -188,20 +192,33 @@ def parse_args(argv):
         help="Maximum number of pages to crawl")
     parser.add_argument("--all", action="store_true",
         help="Retrieve all pages under the specified roots")
-    # TODO: add other output location than sys.stdout
-    return parser.parse_args(argv)
+    parser.add_argument("--out", type=argparse.FileType('w'),
+        default=sys.stdout,
+        help="Output file, defaults to stdout")
+
+    args = parser.parse_args(argv)
+    if args.all:
+        args.max_pages = math.inf
+    return args
 
 
 async def main(argv):
+    """Runs a crawler under an event loop"""
     args = parse_args(argv)
-    if args.all:
-        max_pages = math.inf
-    else:
-        max_pages = args.max_pages
+    yaml = YAML()
+    yaml.register_class(Tag)
 
-    crawler = Crawler(args.roots, max_pages, args.num_workers, sys.stdout)
+    def serializer(objs):
+        # NOTE: outputing a list takes advantage of YAML's
+        # serialization for lists, which is both concatable and
+        # tailable
+        yaml.dump(objs, sys.stdout)
+
+    crawler = Crawler(
+        aiohttp.ClientSession, serializer,
+        args.roots, args.max_pages, args.num_workers)
     await crawler.crawl()
-
+                
 
 if __name__ == "__main__":  # pragma: no cover
     asyncio.run(main(sys.argv[1:]))
