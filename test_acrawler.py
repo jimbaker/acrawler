@@ -29,8 +29,6 @@ example_html = """
 """
 
 
-
-
 def make_fake_http_session(data):
     # The aiohttp client is a bit complex, so creating a fake is likewise complex!
 
@@ -150,6 +148,34 @@ async def test_reference_loop():
         {"href": "https://reference-loop.example"})]]
     assert crawler.frontier.qsize() == 0
     assert crawler.seen == {"https://reference-loop.example"}
+
+
+misc_tags_html = """
+<head>
+    <script src="https://cdn.example/some-javascript.js">Ignored</script>
+</head>
+<body>
+    <img src="image-123.jpeg"/>
+    <p><a href="https://this.example/page2">Click for a page</a></p>
+    <p><a href="https://another.example">Click for another page</a></p>
+</body>
+"""
+
+def test_process_sitemap_tags():
+    #def process_sitemap_tags(self, url, tag_parser, chunk):
+    crawler = acrawler.Crawler(None, None, [])
+    tag_parser = acrawler.TagParser({"a", "img"})
+    tags = list(crawler.process_sitemap_tags(
+        "https://this.example", tag_parser, misc_tags_html))
+
+    assert tags == [
+        acrawler.Tag("img", "https://this.example/image-123.jpeg",
+                     {"src": "image-123.jpeg"}),
+        acrawler.Tag("a", "https://this.example/page2",
+                     {"href": "https://this.example/page2"}),
+        acrawler.Tag("a", "https://another.example",
+                     {"href": "https://another.example"})
+    ]
 
 
 def test_parse_command_line_some_pages():

@@ -84,8 +84,8 @@ def resolve_url(root, url):
 
 
 class Crawler:
-    # FIXME add doc string
-
+    """Crawls URLs using async tasks and an in-memory frontier queue"""
+    
     def __init__(self, session_maker, serializer, root_urls, max_pages=5, num_workers=3):
         # TODO we should also have some way of configuring seen/frontier
         self.session_maker = session_maker
@@ -157,7 +157,10 @@ class Crawler:
                 yield tag
 
     def process_sitemap_tags(self, url, tag_parser, chunk):
-        """Yields sitemap tags augmented with `url` and adds to `frontier` if under roots"""
+        """Yields sitemap tags and added to `frontier` if under `roots`"""
+        # TODO: This method should be refactored to support a separate factory,
+        # much like session_maker and serializer. This work will require
+        # revisiting tag_parser/chunk calling convention from crawl_next.
         for tag in tag_parser.consume(chunk):
             if tag.name == "a" and "href" in tag.attrs:
                 tag.url = resolve_url(url, tag.attrs["href"])
@@ -178,7 +181,7 @@ class Crawler:
 
 
 def parse_args(argv):
-    """FIXME"""
+    """Parse command line arguments and return an argparse `Namespace`"""
     parser = argparse.ArgumentParser(
         description="Output sitemap by crawling specified root URLs.")
     parser.add_argument("roots", metavar="URL", nargs="+",
@@ -189,7 +192,9 @@ def parse_args(argv):
         help="Maximum number of pages to crawl")
     parser.add_argument("--all", action="store_true",
         help="Retrieve all pages under the specified roots")
-    # TODO: add other output location than sys.stdout
+    parser.add_argument("--out", type=argparse.FileType('w'),
+        default=sys.stdout,
+        help="Output file, defaults to stdout")
 
     args = parser.parse_args(argv)
     if args.all:
