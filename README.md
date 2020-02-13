@@ -12,7 +12,7 @@ NOTE: This code requires the use of Python 3.8 (possibly lower). I recommend
 using the standard support for virtual enviroments, namely something like the
 following before running the make commands above:
 
-```
+```bash
 $ python3.8 -m venv env_acrawler
 $ . env_acrawler/bin/activate
 $ make init
@@ -21,13 +21,13 @@ $ make init
 The above sets `python` to the appropriate version. You can then run with this
 command:
 
-```
+```bash
 $ python acrawler.py https://example.com
 ```
 
 which will produce this YAML-serialized sitemap:
 
-```
+```yaml
 - !Tag
   name: a
   url: https://www.iana.org/domains/example
@@ -39,25 +39,104 @@ If you are feeling bold, you can try running the crawler with the `--all` option
 -- it will crawl all pages under the specified root. *This could be a large
 result set.*
 
-# TODOs
+## Testing
 
-There are a number of straightforward FIXMEs in the code. Some additions:
+The code currently has 100% coverage (excluding two *no cover* lines used for
+`__main__` script support). To generate a detailed coverage report into the
+directory `htmlcov`:
 
-* More extensive testing. Currently there is about 93% coverage, but this is
-  mostly due to a functional testing. A little refactoring plus some more unit
-  testing would be great, but of course async code is somewhat harder to test!
+```bash
+$ pytest --cov=acrawler --cov-report=html:htmlcov test_acrawler.py
+```
 
-* Proper support of 301 Redirections, `robots.txt`, and other crawling niceties.
+FIXME add label support for this in GitHub.
 
-* API support would be readily supportable, with some additions on setting up
-  the client connection, eg for API keys.
+The current coverage feels quite good. In particular, there's minimal branching
+in the code, since it follows a generator-based approach, and my attempt to
+bring back coverage to 100% removed some conditional complexity.
+
+All but one test is a unit test. Non-async unit testing follows the typical
+pattern of setup-apply-test. Async unit testing also can follow this pattern,
+but with a bit more subtlety. Here are the considerations:
+
+* Use the `pytest.mark.asyncio` decorator such that async functions can get a
+  corresponding event loop during testing, plus such checking as all coroutines
+  are run to completion.
+
+* No usage of sleeps in test code (or the code itself, unless there is a
+  specific interop consideration, eg we are implementing polling, etc). Note
+  that one exception here is the special case of `asyncio.sleep(0)`, which
+  simply yields back to the event loop. Regardless, this yielding is not used
+  here.
+
+* Use of constant coroutines. By using `asyncio.Future` allows for the
+  writing of constant coroutines and without introducing unnecessary `async` and
+  `await` keywords in these tests. Because we should test exceptional paths as
+  well, a TODO is to use `fake_reponse.set_exception` to cook an appropriate
+  exception and validate any cprresponding logic, such as attempting to retry,
+  other recovery, or failing appropriately.
+
+In particular, testing a fake HTTP client (instead of
+`aiohttp.ClientSession`) required writing code with this pattern to support
+`async with` usage:
+
+```python
+    class FakeAsyncContextManager:
+        def __init__(self):
+            self.response = FakeResponse()
+
+        def __aenter__(self):
+            fake_response = asyncio.Future()
+            fake_response.set_result(self.response)
+            return fake_response
+
+        def __aexit__(self, exc_type, exc, tb):
+            fake_exit = asyncio.Future()
+            fake_exit.set_result(None)
+            return fake_exit
+```
+
+See [PEP 492 -- Coroutines with async and await
+syntax](https://www.python.org/dev/peps/pep-0492/#asynchronous-context-managers-and-async-with)
+for more details on this protocol with `__aenter__` and `__aexit__` methods.
+
+## Typing
+
+Adding static type annotations is a forthcoming step.
+
+## TODOs
+
+There are a number of straightforward TODOs in the code. Some additions:
+
+**Collector**
+
+* Pluggable to determine what is of interest for collecting, and how to extract the relevant tags.
+* Support 301 Redirections, `robots.txt`,
+  [timeouts](https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts),
+  and other crawling niceties.
+* API support, with some additions on setting up the client connection, eg for
+  API keys. One possible demo: GraphQL client consuming GitHub as part of an API
+  crawler demo.
+
+**Scheduler**
 
 * Support for a scalable queue system like Redis. It would be straightforward to
-  map our FIFO queues onto a Redis queue, including async support. Now you would
-  have the potential to rival Google in your crawling ability, or at least
-  [Scrapy](https://scrapy.org/).
+  map FIFO queues onto a Redis queue, including [async
+  support](https://aioredis.readthedocs.io/). Such support should use [reliable
+  queue ops](https://redis.io/commands/RPOPLPUSH). Now you would have the
+  potential to rival Google in your crawling ability, or at least
+  [Scrapy](https://scrapy.org/)!
 
-# Branches
+**Storage**
+
+Storage options include the following:
+
+* Serialize/Deserialize on the YAML sitemap format (partially implemented).
+* Redis-based storage using sorted sets -- this approach could be useful for
+  periodically rescanning URLs based on a global or specific timeliness metric.
+* Support indexing into ElasticSearch.
+
+## Branches
 
 This project is a demonstration on how to approach the building of a scalable web
 crawler by using asyncio. Therefore I have attached the sequence of branches
