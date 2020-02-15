@@ -119,15 +119,15 @@ async def test_crawler():
         tags.append(objects)
 
     crawler = acrawler.Crawler(
-        fake_session_maker, serializer,
-        ["https://url-is.invalid", "https://another-url-is.invalid"],
+        acrawler.SimpleScheduler(), fake_session_maker, serializer,
         num_workers=1, max_pages=1)
-    await crawler.crawl()
+    await crawler.crawl(
+        ["https://url-is.invalid", "https://another-url-is.invalid"])
     assert tags == [[Tag(
         "a", "https://www.iana.org/domains/example",
         {"href": "https://www.iana.org/domains/example"})]]
-    assert crawler.frontier.qsize() == 0
-    assert len(crawler.seen) == 1
+    assert await crawler.scheduler.qsize() == 0
+    assert len(crawler.scheduler.seen) == 1
 
 
 @pytest.mark.asyncio
@@ -140,14 +140,13 @@ async def test_reference_loop():
         tags.append(objects)
 
     crawler = acrawler.Crawler(
-        fake_session_maker, serializer,
-        ["https://reference-loop.example"])
-    await crawler.crawl()
+        acrawler.SimpleScheduler(), fake_session_maker, serializer)
+    await crawler.crawl(["https://reference-loop.example"])
     assert tags == [[Tag(
         "a", "https://reference-loop.example",
         {"href": "https://reference-loop.example"})]]
-    assert crawler.frontier.qsize() == 0
-    assert crawler.seen == {"https://reference-loop.example"}
+    assert await crawler.scheduler.qsize() == 0
+    assert crawler.scheduler.seen == {"https://reference-loop.example"}
 
 
 misc_tags_html = """
@@ -163,7 +162,7 @@ misc_tags_html = """
 
 def test_process_sitemap_tags():
     #def process_sitemap_tags(self, url, tag_parser, chunk):
-    crawler = acrawler.Crawler(None, None, [])
+    crawler = acrawler.Crawler(None, None, None)
     tag_parser = acrawler.TagParser({"a", "img"})
     tags = list(crawler.process_sitemap_tags(
         "https://this.example", tag_parser, misc_tags_html))
