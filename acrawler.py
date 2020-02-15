@@ -83,40 +83,74 @@ def resolve_url(root, url):
     ))
 
 
+class SimpleScheduler:
+    def __init__(self):
+        self.frontier = asyncio.Queue()
+        self.seen = set()
+
+    async def add_to_frontier(self, url):
+        if url not in self.seen:
+            await self.frontier.put(url)
+
+    async def join(self):
+        await self.frontier.join()
+
+    async def get(self):
+        while True:
+            url = await self.frontier.get()
+            if url not in self.seen:
+                self.seen.add(url)
+                return url
+
+    async def qsize(self):
+        await asyncio.sleep(0)
+        return self.frontier.qsize()
+
+    async def count(self):
+        # strictly speaking, len(seen) is not the number of pages
+        # once we implement redirect unification - need to consider that separately
+        await asyncio.sleep(0)
+        return len(self.seen)
+
+    async def drain(self):
+        """Drain the frontier"""
+        while True:
+            await self.frontier.get()
+            self.frontier.task_done()
+
+    def task_done(self):
+        self.frontier.task_done()
+
+
 class Crawler:
     """Crawls URLs using async tasks and an in-memory frontier queue"""
     
-    def __init__(self, session_maker, serializer, root_urls, max_pages=5, num_workers=3):
-        # TODO we should also have some way of configuring seen/frontier
-        self.session_maker = session_maker
-        self.serializer = serializer
-        self.root_urls = root_urls
+    def __init__(self, scheduler, collector, storage, max_pages=5, num_workers=3):
+        self.scheduler = scheduler
+        self.collector = collector
+        self.storage = storage
+
         self.sites = set()
         self.max_pages = max_pages
         self.num_workers = num_workers
 
-        self.frontier = asyncio.Queue()
-        self.count_pages = 0
-        self.seen = set()
+    async def crawl(self, root_urls):
+        """Create and run worker tasks to process the `frontier` concurrently"""
 
         for url in root_urls:
             parsed_url = urllib.parse.urlsplit(url)
             self.sites.add(parsed_url.netloc)
-            self.frontier.put_nowait(url)
+            await self.scheduler.add_to_frontier(url)
 
-    async def crawl(self):
-        """Create and run worker tasks to process the `frontier` concurrently"""
-        
         # This method's implementation is modestly modified from the boilerplate
         # in https://docs.python.org/3/library/asyncio-queue.html#examples
-        
         tasks = []
         for i in range(self.num_workers):
             task = asyncio.create_task(self.worker(f'worker-{i}'))
             tasks.append(task)
 
         # Wait until the frontier queue is fully processed.
-        await self.frontier.join()
+        await self.scheduler.join()
         
         # Cancel our worker tasks.
         for task in tasks:
@@ -128,55 +162,50 @@ class Crawler:
     async def worker(self, name):
         # TODO: when crawling APIs/password protected sites, this should be done
         # per site - presumably this can be memoized
-        async with self.session_maker() as session:
-            while self.count_pages < self.max_pages:
-                # TODO: support other policies in addition to breadth-first
-                # traversal of the frontier
-                url = await self.frontier.get()
+        async with self.collector() as session:
+            while True:
+                count_pages = await self.scheduler.count()
+                if count_pages >= self.max_pages:
+                    break
+                url = await self.scheduler.get()
                 async for tag in self.crawl_next(session, url):
-                    self.serializer([tag])
-                self.frontier.task_done()
-                self.count_pages += 1
+                    self.storage([tag])
+                self.scheduler.task_done()
         
-        # Drain the frontier - do not want to cause a DOS attack
-        while True:
-            url = await self.frontier.get()
-            self.frontier.task_done()
+        # Retrieved the maximum number of pages, and we do not want to cause a
+        # DOS attack
+        await self.scheduler.drain()
 
     async def crawl_next(self, session, url):
         """Crawls the next url from the `frontier`, processing tags for the sitemap"""
-        if url in self.seen:
-            return
-        self.seen.add(url)
-
         tag_parser = TagParser({"a", "img"})
 
         # TODO: support 301, error handling in general here
         async for chunk in fetch(session, url):
             for tag in self.process_sitemap_tags(url, tag_parser, chunk):
                 yield tag
+                # Filter entries placed on the exploration frontier such
+                # that they are all prefixed by one of the root sites
+                if tag.name == "a":
+                    parsed_tag_url = urllib.parse.urlsplit(tag.url)
+                    if parsed_tag_url.netloc in self.sites:
+                        await self.scheduler.add_to_frontier(tag.url)
 
     def process_sitemap_tags(self, url, tag_parser, chunk):
         """Yields sitemap tags and added to `frontier` if under `roots`"""
-        # TODO: This method should be refactored to support a separate factory,
-        # much like session_maker and serializer. This work will require
-        # revisiting tag_parser/chunk calling convention from crawl_next.
+        # TODO: This method should be refactored so it is a separate pluggable
+        # factory, much like session_maker and serializer. This work will
+        # require revisiting tag_parser/chunk calling convention from
+        # crawl_next.
         for tag in tag_parser.consume(chunk):
             if tag.name == "a" and "href" in tag.attrs:
                 tag.url = resolve_url(url, tag.attrs["href"])
-                # TODO: repeat of the above parsing work, but of course
-                # minor amount of work
-                parsed_tag_url = urllib.parse.urlsplit(tag.url)
 
-                # Filter entries placed on the exploration frontier such
-                # that they are all prefixed by one of the root sites
-                if parsed_tag_url.netloc in self.sites:
-                    self.frontier.put_nowait(tag.url)
             elif tag.name == "img" and "src" in tag.attrs:
                 tag.url = resolve_url(url, tag.attrs["src"])
 
             if tag.url is not None:
-                # If it has a url defined, it is part of the sitemap, so yield
+                # If there's now a url defined, then it is part of the sitemap
                 yield tag
 
 
@@ -215,9 +244,9 @@ async def main(argv):
         yaml.dump(objs, sys.stdout)
 
     crawler = Crawler(
-        aiohttp.ClientSession, serializer,
-        args.roots, args.max_pages, args.num_workers)
-    await crawler.crawl()
+        SimpleScheduler(), aiohttp.ClientSession, serializer,
+        args.max_pages, args.num_workers)
+    await crawler.crawl(args.roots)
                 
 
 if __name__ == "__main__":  # pragma: no cover
