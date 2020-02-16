@@ -1,4 +1,5 @@
 aiohttp[speedups]   # use for asyncio HTTP client
+aioredis            # async client for Redis
 ruamel.yaml         # YAML 1.2 serializer/deserializer
 
 # testing support

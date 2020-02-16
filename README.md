@@ -66,9 +66,8 @@ but with a bit more subtlety. Here are the considerations:
 * No usage of sleeps in test code (or the code itself, unless there is a
   specific interop consideration, eg we are implementing polling, etc). Note
   that one exception here is the special case of `asyncio.sleep(0)`, which
-  simply yields back to the event loop. Regardless, this yielding is not used
-  here.
-
+  simply yields back to the event loop.
+  
 * Use of constant coroutines. By using `asyncio.Future` allows for the
   writing of constant coroutines and without introducing unnecessary `async` and
   `await` keywords in these tests. Because we should test exceptional paths as
@@ -100,6 +99,21 @@ See [PEP 492 -- Coroutines with async and await
 syntax](https://www.python.org/dev/peps/pep-0492/#asynchronous-context-managers-and-async-with)
 for more details on this protocol with `__aenter__` and `__aexit__` methods.
 
+## Redis support
+
+Now added with `RedisScheduler`, which parallels `SimpleScheduler` (built on
+`asyncio.Queue`) but more work to be done.
+
+Note that we want to keep track of work items in Redis, not jobs/tasks as we see
+in tools like [arq](https://arq-docs.helpmanual.io/) or
+[Celery](http://www.celeryproject.org/). This is because we have homogeneous
+tasks, and for an at-scale crawl, we want to do more interesting scheduling of
+this work based on the characteristics of these work items.
+
+Next steps also include considering how to cluster. While in general URLs would
+be a great partition key, we cannot just use `...{url}...` in our keys given
+that the `seen` and `frontier` keys are global! So some additional work.
+
 ## Typing
 
 Adding static type annotations is a forthcoming step.
@@ -118,6 +132,8 @@ There are a number of straightforward TODOs in the code. Some additions:
   API keys. One possible demo: GraphQL client consuming GitHub as part of an API
   crawler demo.
 
+Multiple plugins make sense here, to handle different types of URLs.
+
 **Scheduler**
 
 * Support for a scalable queue system like Redis. It would be straightforward to
@@ -135,6 +151,8 @@ Storage options include the following:
 * Redis-based storage using sorted sets -- this approach could be useful for
   periodically rescanning URLs based on a global or specific timeliness metric.
 * Support indexing into ElasticSearch.
+
+Multiple plugins also make sense - one might want to both index **and** create a sitemap.
 
 ## Branches
 

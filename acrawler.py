@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 
 import aiohttp
+import aioredis
 from ruamel.yaml import YAML
 
 
@@ -88,6 +89,9 @@ class SimpleScheduler:
         self.frontier = asyncio.Queue()
         self.seen = set()
 
+    async def setup(self):
+        await asyncio.sleep(0)
+
     async def add_to_frontier(self, url):
         if url not in self.seen:
             await self.frontier.put(url)
@@ -122,6 +126,79 @@ class SimpleScheduler:
         self.frontier.task_done()
 
 
+# FIXME add TTL, including on seen for real stuff;
+# see https://stackoverflow.com/questions/17060672/ttl-for-a-set-member
+
+# FIXME factor out constants like "seen", etc keys - easy to get this mixed up
+
+class RedisScheduler:
+    def __init__(self, connstr="redis://localhost"):
+        self.connstr = connstr
+
+    async def setup(self):
+        self.redis = await aioredis.create_redis_pool(self.connstr)
+        tr = self.redis.multi_exec()
+        tr.sinterstore("seen", "zero-out-with-nonexistent-set")
+        tr.ltrim("frontier", 1, 0)
+        await tr.execute()
+
+    async def add_to_frontier(self, url):
+        await self.redis.lpush("frontier", url.encode("utf-8"))
+
+    async def join(self):
+        # Poll for the frontier to be empty.
+        #
+        # NOTE: There's probably a better way to do this!  
+        # The more complicated solution would be to do keyspace notification on
+        # the frontier then subscribe to that channel using a blocking approach.
+        while True:
+            count_urls = await self.redis.llen("frontier")
+            if count_urls == 0:
+                return
+            await asyncio.sleep(1.0)
+        self.redis.close()
+        await self.redis.wait_closed()
+
+    async def get(self):
+        while True:
+            # Avoid racing by combining ops into a script
+            # FIXME use evalsha command with load_script
+            encoded_url = await self.redis.eval("""
+            local frontier_key = KEYS[1]
+            local seen_key = KEYS[2]
+            local url = redis.call('RPOP', frontier_key)
+            if url then
+              if redis.call('SISMEMBER', seen_key, url) == 0 then
+                redis.call('SADD', seen_key, url)
+                return url
+              else
+                return nil
+              end
+            else
+              return nil
+            end
+            """, keys=["frontier", "seen"])
+            if encoded_url:
+                return encoded_url.decode("utf-8")
+
+    async def qsize(self):
+        # NOTE this method is only for testing purposes
+        await self.redis.llen("frontier")
+
+    async def count(self):
+        # NOTE: strictly speaking, len(seen) is not the number of pages.
+        # Once we implement redirect unification, need to consider that separately
+        count_pages = await self.redis.scard("seen")
+        return count_pages
+
+    async def drain(self):
+        """Drain the frontier"""
+        await self.redis.ltrim("frontier", 1, 0)
+        
+    def task_done(self):
+        pass  # FIXME this should move off the worker task queue so we don't lose track
+
+
 class Crawler:
     """Crawls URLs using async tasks and an in-memory frontier queue"""
     
@@ -136,7 +213,7 @@ class Crawler:
 
     async def crawl(self, root_urls):
         """Create and run worker tasks to process the `frontier` concurrently"""
-
+        await self.scheduler.setup()
         for url in root_urls:
             parsed_url = urllib.parse.urlsplit(url)
             self.sites.add(parsed_url.netloc)
@@ -244,7 +321,7 @@ async def main(argv):
         yaml.dump(objs, sys.stdout)
 
     crawler = Crawler(
-        SimpleScheduler(), aiohttp.ClientSession, serializer,
+        RedisScheduler(), aiohttp.ClientSession, serializer,
         args.max_pages, args.num_workers)
     await crawler.crawl(args.roots)
                 
