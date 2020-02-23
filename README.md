@@ -132,6 +132,11 @@ There are a number of straightforward TODOs in the code. Some additions:
   API keys. One possible demo: GraphQL client consuming GitHub as part of an API
   crawler demo.
 
+This pluggability witll enable support for better HTML parsing, as seen with
+https://github.com/html5lib/html5lib-python and
+https://github.com/mozilla/bleach
+
+
 Multiple plugins make sense here, to handle different types of URLs.
 
 **Scheduler**
@@ -142,6 +147,12 @@ Multiple plugins make sense here, to handle different types of URLs.
   queue ops](https://redis.io/commands/RPOPLPUSH). Now you would have the
   potential to rival Google in your crawling ability, or at least
   [Scrapy](https://scrapy.org/)!
+
+* Per-site scheduling. Such scheduling shoudl also support max tasks per site,
+  vs overall max tasks. So it's certainly reasonable to crawl a given site with
+  5 or so tasks - this should be similar to a browser. But while asyncio can
+  readily do 10000+ tasks (assuming no other bottlenecks, once serialization is
+  also fixed), that would be a something to avoid.
 
 **Storage**
 

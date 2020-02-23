@@ -4,13 +4,14 @@ import contextlib
 import functools
 import math
 import unittest
-import unittest.mock
 
 import acrawler
 import pytest
 from acrawler import Tag
 from ruamel.yaml import YAML
 
+# NOTE: https://bugs.python.org/issue38529
+# "Python 3.8 improperly warns about closing properly closed streams" - fixed in 3.8.1
 
 # Based on the page from https://example.com
 example_html = """
@@ -30,7 +31,8 @@ example_html = """
 
 
 def make_fake_http_session(data):
-    # The aiohttp client is a bit complex, so creating a fake is likewise complex!
+    # The aiohttp client is a bit complex, so creating a fake is likewise
+    # complex!
 
     class FakeContent:
         def __init__(self, num_chunks=13):
@@ -109,8 +111,50 @@ reference_loop_html = """
 """
 
 
+# Yes, there is https://github.com/guillotinaweb/pytest-docker-fixtures, with support for Redis among others;
+# TBD how well it works!
+# See https://guillotina.io/ (a Plone project)
+
+# Need to make Redis testing an optional dependency, possibly along with using Docker;
+# use cmdopt fixture support for this; https://docs.pytest.org/en/latest/example/simple.html
+
+# Note that we may want to scope to the module, instead of using function
+# scope, to avoid the overhead of spinning up/down a Redis instance with
+# Docker (once we implement that). But first see if that's a real cost.
+
+@pytest.fixture(params=[acrawler.SimpleScheduler, acrawler.RedisScheduler])
+async def scheduler(request, event_loop):
+    my_scheduler = request.param()
+    yield my_scheduler
+    await my_scheduler.close()
+
+
 @pytest.mark.asyncio
-async def test_crawler():
+async def test_scheduler(scheduler):
+    await scheduler.setup()
+
+    await scheduler.add_to_frontier("https://some.example")
+    assert await scheduler.qsize() == 1
+    assert await scheduler.count() == 0
+    assert await scheduler.get() == "https://some.example"
+    scheduler.task_done()
+    assert (await scheduler.qsize()) == 0
+    assert (await scheduler.count()) == 1
+
+    await scheduler.add_to_frontier("https://another.example")
+    await scheduler.add_to_frontier("https://yet-another.example")
+    await scheduler.add_to_frontier("https://one-more.example")
+    assert (await scheduler.qsize()) == 3
+    assert (await scheduler.count()) == 1
+    await scheduler.drain()
+    assert (await scheduler.qsize()) == 0
+    assert (await scheduler.count()) == 1
+
+    await scheduler.join()
+
+
+@pytest.mark.asyncio
+async def test_crawler(scheduler):
     fake_session_maker = functools.partial(
         make_fake_http_session, bytes(example_html, "utf-8"))
 
@@ -119,7 +163,7 @@ async def test_crawler():
         tags.append(objects)
 
     crawler = acrawler.Crawler(
-        acrawler.SimpleScheduler(), fake_session_maker, serializer,
+        scheduler, fake_session_maker, serializer,
         num_workers=1, max_pages=1)
     await crawler.crawl(
         ["https://url-is.invalid", "https://another-url-is.invalid"])
@@ -127,11 +171,11 @@ async def test_crawler():
         "a", "https://www.iana.org/domains/example",
         {"href": "https://www.iana.org/domains/example"})]]
     assert await crawler.scheduler.qsize() == 0
-    assert len(crawler.scheduler.seen) == 1
+    assert await crawler.scheduler.count() == 1
 
 
 @pytest.mark.asyncio
-async def test_reference_loop():
+async def test_reference_loop(scheduler):
     fake_session_maker = functools.partial(
         make_fake_http_session, bytes(reference_loop_html, "utf-8"))
 
@@ -140,13 +184,13 @@ async def test_reference_loop():
         tags.append(objects)
 
     crawler = acrawler.Crawler(
-        acrawler.SimpleScheduler(), fake_session_maker, serializer)
+        scheduler, fake_session_maker, serializer)
     await crawler.crawl(["https://reference-loop.example"])
     assert tags == [[Tag(
         "a", "https://reference-loop.example",
         {"href": "https://reference-loop.example"})]]
     assert await crawler.scheduler.qsize() == 0
-    assert crawler.scheduler.seen == {"https://reference-loop.example"}
+    assert await crawler.scheduler.seen() == {"https://reference-loop.example"}
 
 
 misc_tags_html = """
@@ -161,7 +205,6 @@ misc_tags_html = """
 """
 
 def test_process_sitemap_tags():
-    #def process_sitemap_tags(self, url, tag_parser, chunk):
     crawler = acrawler.Crawler(None, None, None)
     tag_parser = acrawler.TagParser({"a", "img"})
     tags = list(crawler.process_sitemap_tags(
@@ -212,10 +255,21 @@ def test_resolve_url():
         "https://example.com"
 
 
-# Requires internet connectivity to test
+def SimpleSchedulerOption():
+    return []
+
+def RedisSchedulerOption():
+    return ["--redis=redis://localhost"]
+
+@pytest.fixture(params=[SimpleSchedulerOption, RedisSchedulerOption])
+def command_options(request):
+    return request.param()
+
+# FIXME Requires internet connectivity to test, so make that a fixture too
 @pytest.mark.asyncio
-async def test_run_acrawler(capsys):
-    await acrawler.main(["https://example.com"])
+async def test_run_acrawler(command_options, capsys):
+    argv = command_options + ["https://example.com"]
+    await acrawler.main(argv)
     captured = capsys.readouterr()
     assert captured.out == """\
 - !Tag

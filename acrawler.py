@@ -84,16 +84,37 @@ def resolve_url(root, url):
     ))
 
 
+# Futures are not chainable (in the bind/flat map sense) - perhaps they should
+# be like JS Promises; but some quick helper code works here just fine.
+def make_future_result(value):
+    future = asyncio.Future()
+    future.set_result(value)
+    return future
+
+
+# FIXME Refactor the schedulers so they share a base class, in part to share common
+# code
+
 class SimpleScheduler:
     def __init__(self):
         self.frontier = asyncio.Queue()
-        self.seen = set()
+        self._seen = set()
 
-    async def setup(self):
-        await asyncio.sleep(0)
+    def setup(self):
+        return make_future_result(None)
+
+    def close(self):
+        return make_future_result(None)
+
+    async def __aenter__(self):
+        await self.setup()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
 
     async def add_to_frontier(self, url):
-        if url not in self.seen:
+        if url not in self._seen:
             await self.frontier.put(url)
 
     async def join(self):
@@ -102,26 +123,31 @@ class SimpleScheduler:
     async def get(self):
         while True:
             url = await self.frontier.get()
-            if url not in self.seen:
-                self.seen.add(url)
+            if url not in self._seen:
+                self._seen.add(url)
                 return url
 
-    async def qsize(self):
-        await asyncio.sleep(0)
-        return self.frontier.qsize()
+    def qsize(self):
+        return make_future_result(self.frontier.qsize())
 
-    async def count(self):
-        # strictly speaking, len(seen) is not the number of pages
-        # once we implement redirect unification - need to consider that separately
-        await asyncio.sleep(0)
-        return len(self.seen)
+    def count(self):
+        # Strictly speaking, len(seen) is not the number of pages.
+        # Once we implement redirect unification, need to consider that
+        # separately.
+        return make_future_result(len(self._seen))
 
-    async def drain(self):
+    def seen(self):
+        return make_future_result(self._seen)
+
+    def drain(self):
         """Drain the frontier"""
         while True:
-            await self.frontier.get()
-            self.frontier.task_done()
-
+            try:
+                self.frontier.get_nowait()
+                self.frontier.task_done()
+            except asyncio.queues.QueueEmpty:
+                return make_future_result(None)
+            
     def task_done(self):
         self.frontier.task_done()
 
@@ -142,28 +168,9 @@ class RedisScheduler:
         tr.ltrim("frontier", 1, 0)
         await tr.execute()
 
-    async def add_to_frontier(self, url):
-        await self.redis.lpush("frontier", url.encode("utf-8"))
-
-    async def join(self):
-        # Poll for the frontier to be empty.
-        #
-        # NOTE: There's probably a better way to do this!  
-        # The more complicated solution would be to do keyspace notification on
-        # the frontier then subscribe to that channel using a blocking approach.
-        while True:
-            count_urls = await self.redis.llen("frontier")
-            if count_urls == 0:
-                return
-            await asyncio.sleep(1.0)
-        self.redis.close()
-        await self.redis.wait_closed()
-
-    async def get(self):
-        while True:
-            # Avoid racing by combining ops into a script
-            # FIXME use evalsha command with load_script
-            encoded_url = await self.redis.eval("""
+        # Avoid data races by combining ops into a script for all-or-nothing
+        # semantics
+        self.get_url_script_sha1 = await self.redis.script_load("""
             local frontier_key = KEYS[1]
             local seen_key = KEYS[2]
             local url = redis.call('RPOP', frontier_key)
@@ -177,26 +184,63 @@ class RedisScheduler:
             else
               return nil
             end
-            """, keys=["frontier", "seen"])
+            """)
+
+    async def close(self):
+        self.redis.close()
+        await self.redis.wait_closed()
+
+    async def __aenter__(self):
+        await self.setup()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+
+    async def add_to_frontier(self, url):
+        await self.redis.lpush("frontier", url.encode("utf-8"))
+
+    async def join(self):
+        # Poll for the frontier to be empty.
+        #
+        # NOTE: There's probably a better way to do this! 
+        #
+        # The slightly more complicated solution would be to do keyspace
+        # notification on the frontier, then subscribe to that channel using
+        # a blocking approach. Let's do that.
+        while True:
+            count_urls = await self.redis.llen("frontier")
+            if count_urls == 0:
+                return
+            await asyncio.sleep(1.0)
+
+    async def get(self):
+        while True:
+            encoded_url = await self.redis.evalsha(
+                self.get_url_script_sha1, keys=["frontier", "seen"])
             if encoded_url:
                 return encoded_url.decode("utf-8")
 
     async def qsize(self):
-        # NOTE this method is only for testing purposes
-        await self.redis.llen("frontier")
+        return await self.redis.llen("frontier")
 
     async def count(self):
-        # NOTE: strictly speaking, len(seen) is not the number of pages.
-        # Once we implement redirect unification, need to consider that separately
+        # NOTE: strictly speaking, len(seen) is not the number of pages. Once
+        # we implement redirect unification, need to consider that separately
         count_pages = await self.redis.scard("seen")
         return count_pages
+
+    async def seen(self):
+        return {url.decode("utf-8") for url in await self.redis.smembers("seen")}
 
     async def drain(self):
         """Drain the frontier"""
         await self.redis.ltrim("frontier", 1, 0)
         
     def task_done(self):
-        pass  # FIXME this should move off the worker task queue so we don't lose track
+          # FIXME use this entry point as part of to-be-implemented worker task
+          # queue (with RPOPLPUSH) so we don't lose track of work items
+        pass
 
 
 class Crawler:
@@ -272,7 +316,7 @@ class Crawler:
         """Yields sitemap tags and added to `frontier` if under `roots`"""
         # TODO: This method should be refactored so it is a separate pluggable
         # factory, much like session_maker and serializer. This work will
-        # require revisiting tag_parser/chunk calling convention from
+        # require revisiting the tag_parser/chunk calling convention from
         # crawl_next.
         for tag in tag_parser.consume(chunk):
             if tag.name == "a" and "href" in tag.attrs:
@@ -290,15 +334,23 @@ def parse_args(argv):
     """Parse command line arguments and return an argparse `Namespace`"""
     parser = argparse.ArgumentParser(
         description="Output sitemap by crawling specified root URLs.")
-    parser.add_argument("roots", metavar="URL", nargs="+",
+    parser.add_argument(
+        "roots", metavar="URL", nargs="+",
         help="List of URL roots to crawl")
-    parser.add_argument("--num-workers", type=int, default=3,
+    parser.add_argument(
+        "--redis", metavar="CONNSTR",
+        help="Use Redis with specified connection string (ex: redis://localhost)")
+    parser.add_argument(
+        "--num-workers", type=int, default=3,
         help="Number of workers to concurrently crawl pages")
-    parser.add_argument("--max-pages", type=int, default=25,
+    parser.add_argument(
+        "--max-pages", type=int, default=25,
         help="Maximum number of pages to crawl")
-    parser.add_argument("--all", action="store_true",
+    parser.add_argument(
+        "--all", action="store_true",
         help="Retrieve all pages under the specified roots")
-    parser.add_argument("--out", type=argparse.FileType('w'),
+    parser.add_argument(
+        "--out", type=argparse.FileType('w'),
         default=sys.stdout,
         help="Output file, defaults to stdout")
 
@@ -320,10 +372,15 @@ async def main(argv):
         # tailable
         yaml.dump(objs, sys.stdout)
 
-    crawler = Crawler(
-        RedisScheduler(), aiohttp.ClientSession, serializer,
-        args.max_pages, args.num_workers)
-    await crawler.crawl(args.roots)
+    if args.redis:
+        scheduler = RedisScheduler(args.redis)
+    else:
+        scheduler = SimpleScheduler()
+    async with scheduler as open_scheduler:
+        crawler = Crawler(
+            open_scheduler, aiohttp.ClientSession, serializer,
+            args.max_pages, args.num_workers)
+        await crawler.crawl(args.roots)
                 
 
 if __name__ == "__main__":  # pragma: no cover
